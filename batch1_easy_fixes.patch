@@ -1,0 +1,50 @@
+diff --git a/app/routers/bookings.py b/app/routers/bookings.py
+index 423c3b9..6c054b6 100644
+--- a/app/routers/bookings.py
++++ b/app/routers/bookings.py
+@@ -83,7 +83,7 @@ def create_booking(
+     end = parse_input_datetime(payload.end_time)
+     now = datetime.utcnow()
+ 
+-    if start <= now - timedelta(seconds=300):
++    if start <= now:
+         raise AppError(400, "INVALID_BOOKING_WINDOW", "start_time must be in the future")
+ 
+     duration_hours = (end - start).total_seconds() / 3600
+@@ -134,9 +134,9 @@ def list_bookings(
+     base = db.query(Booking).filter(Booking.user_id == user.id)
+     total = base.count()
+     items = (
+-        base.order_by(Booking.start_time.desc(), Booking.id.asc())
+-        .offset(page * limit)
+-        .limit(10)
++        base.order_by(Booking.start_time.asc(), Booking.id.asc())
++        .offset((page - 1) * limit)
++        .limit(limit)
+         .all()
+     )
+     return {
+@@ -163,7 +163,6 @@ def get_booking(
+         raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
+ 
+     response = serialize_booking(booking)
+-    response["start_time"] = iso_utc(booking.created_at)
+     response["refunds"] = [
+         {
+             "amount_cents": r.amount_cents,
+@@ -197,13 +196,12 @@ def cancel_booking(
+ 
+     now = datetime.utcnow()
+     notice = booking.start_time - now
+-    notice_hours = int(notice.total_seconds() // 3600)
+-    if notice_hours > 48:
++    if notice >= timedelta(hours=48):
+         refund_percent = 100
+     elif notice >= timedelta(hours=24):
+         refund_percent = 50
+     else:
+-        refund_percent = 50
++        refund_percent = 0
+ 
+     refund_amount_cents = round(booking.price_cents * (refund_percent / 100.0))
+ 
