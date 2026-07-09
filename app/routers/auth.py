@@ -8,6 +8,7 @@ from ..auth import (
     decode_token,
     get_token_payload,
     hash_password,
+    redeem_refresh_token,
     revoke_access_token,
     verify_password,
 )
@@ -35,12 +36,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         .first()
     )
     if existing is not None:
-        return {
-            "user_id": existing.id,
-            "org_id": org.id,
-            "username": existing.username,
-            "role": existing.role,
-        }
+        raise AppError(409, "USERNAME_TAKEN", "Username already taken in this organization")
 
     user = User(
         org_id=org.id,
@@ -83,6 +79,7 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     data = decode_token(payload.refresh_token)
     if data.get("type") != "refresh":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
+    redeem_refresh_token(data)
     user = db.query(User).filter(User.id == int(data["sub"])).first()
     if user is None:
         raise AppError(401, "UNAUTHORIZED", "Unknown user")
