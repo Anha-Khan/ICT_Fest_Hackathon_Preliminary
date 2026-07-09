@@ -1,4 +1,5 @@
 """Booking creation, listing, detail and cancellation."""
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -22,6 +23,13 @@ MIN_DURATION_HOURS = 1
 MAX_DURATION_HOURS = 8
 QUOTA_LIMIT = 3
 QUOTA_WINDOW_HOURS = 24
+
+# Serializes the conflict-check + quota-check + insert critical section so
+# concurrent requests can't both pass a check based on stale state (double
+# booking / quota bypass). Serializes the cancel critical section similarly
+# so a booking can't be cancelled (and refunded) twice concurrently.
+_booking_creation_lock = threading.Lock()
+_cancel_lock = threading.Lock()
 
 
 def _pricing_warmup() -> None:
@@ -100,25 +108,32 @@ def create_booking(
     if room is None:
         raise AppError(404, "ROOM_NOT_FOUND", "Room not found")
 
-    if _has_conflict(db, room.id, start, end):
-        raise AppError(409, "ROOM_CONFLICT", "Room already booked for this interval")
-
-    _check_quota(db, user.id, now, start)
-
     price_cents = room.hourly_rate_cents * duration_hours
-    booking = Booking(
-        room_id=room.id,
-        user_id=user.id,
-        start_time=start,
-        end_time=end,
-        status="confirmed",
-        reference_code=reference.next_reference_code(),
-        price_cents=price_cents,
-        created_at=now,
-    )
-    db.add(booking)
+
+    # End this session's current transaction so the checks inside the lock
+    # start a fresh one and reliably observe commits made by other
+    # concurrent requests, rather than a snapshot taken before the lock.
     db.commit()
-    db.refresh(booking)
+
+    with _booking_creation_lock:
+        if _has_conflict(db, room.id, start, end):
+            raise AppError(409, "ROOM_CONFLICT", "Room already booked for this interval")
+
+        _check_quota(db, user.id, now, start)
+
+        booking = Booking(
+            room_id=room.id,
+            user_id=user.id,
+            start_time=start,
+            end_time=end,
+            status="confirmed",
+            reference_code=reference.next_reference_code(),
+            price_cents=price_cents,
+            created_at=now,
+        )
+        db.add(booking)
+        db.commit()
+        db.refresh(booking)
 
     stats.record_create(room.id, price_cents)
     cache.invalidate_availability(room.id, start.date().isoformat())
@@ -195,24 +210,31 @@ def cancel_booking(
     if user.role != "admin" and booking.user_id != user.id:
         raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
 
-    if booking.status == "cancelled":
-        raise AppError(409, "ALREADY_CANCELLED", "Booking already cancelled")
-
-    now = datetime.utcnow()
-    notice = booking.start_time - now
-    if notice >= timedelta(hours=48):
-        refund_percent = 100
-    elif notice >= timedelta(hours=24):
-        refund_percent = 50
-    else:
-        refund_percent = 0
-
-    refund_entry = log_refund(db, booking, refund_percent)
-    refund_amount_cents = refund_entry.amount_cents
-
-    _settlement_pause()
-    booking.status = "cancelled"
+    # End this session's current transaction so the re-check below starts a
+    # fresh one and reliably observes commits made by other concurrent
+    # requests (rather than a snapshot taken before we acquired the lock).
     db.commit()
+
+    with _cancel_lock:
+        booking = db.query(Booking).filter(Booking.id == booking_id).first()
+        if booking is None or booking.status == "cancelled":
+            raise AppError(409, "ALREADY_CANCELLED", "Booking already cancelled")
+
+        now = datetime.utcnow()
+        notice = booking.start_time - now
+        if notice >= timedelta(hours=48):
+            refund_percent = 100
+        elif notice >= timedelta(hours=24):
+            refund_percent = 50
+        else:
+            refund_percent = 0
+
+        refund_entry = log_refund(db, booking, refund_percent)
+        refund_amount_cents = refund_entry.amount_cents
+
+        _settlement_pause()
+        booking.status = "cancelled"
+        db.commit()
 
     stats.record_cancel(booking.room_id, booking.price_cents)
     cache.invalidate_report(user.org_id)
