@@ -1,6 +1,6 @@
 # Bug Report — CoWork Multi-Tenant Coworking Space Booking API
 
-21 bugs found and fixed across easy, medium, and hard tiers. Grouped by
+22 bugs found and fixed across easy, medium, and hard tiers. Grouped by
 difficulty; each entry lists the file/line(s), what was wrong, why it broke
 the spec, and how it was fixed. Fixes were verified with the repo's smoke
 test (`tests/test_smoke.py`) and an additional concurrency validation script
@@ -148,6 +148,20 @@ admin could export another org's bookings by passing a foreign `room_id`.
 belonging to their own organization, on every code path."
 **Fix:** That branch now calls `_fetch_scoped(db, org_id, None, room_id)`,
 which scopes by `org_id` via a join on `Room`.
+
+### 22. `app/routers/bookings.py` — `GET /bookings/{id}` missing ownership check
+**Line:** `get_booking`.
+**Bug:** The query filtered only by `Room.org_id == user.org_id`, with no
+check that the booking belonged to the calling member. Any member could
+read any other member's booking (including its refund history) within the
+same org by ID, whether or not it was theirs. `cancel_booking` already had
+the correct ownership check; `get_booking` was missing the equivalent.
+**Spec violated:** Rule 10 — "Members may read and cancel only their own
+bookings (another member's booking id → 404 BOOKING NOT FOUND). Admins may
+read and cancel any booking in their org."
+**Fix:** Added `if user.role != "admin" and booking.user_id != user.id:
+raise AppError(404, "BOOKING_NOT_FOUND", ...)` immediately after the
+existence check, mirroring the check already present in `cancel_booking`.
 
 ---
 

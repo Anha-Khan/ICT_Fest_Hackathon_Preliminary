@@ -1,0 +1,13 @@
+diff --git a/app/routers/bookings.py b/app/routers/bookings.py
+index 10ff196..da64876 100644
+--- a/app/routers/bookings.py
++++ b/app/routers/bookings.py
+@@ -180,6 +180,8 @@ def get_booking(
+     )
+     if booking is None:
+         raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
++    if user.role != "admin" and booking.user_id != user.id:
++        raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
+ 
+     response = serialize_booking(booking)
+     response["refunds"] = [
